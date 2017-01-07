@@ -1,5 +1,8 @@
 # This script simulates a simple LMPC system.
+# ================================================
+# The safe set is always *only* the previous iteration
 # State dynamics and cost function have to be entered twice: Once for the simulation and once for the MPC controller (JuMP).
+# ================================================
 
 using JuMP
 using Ipopt
