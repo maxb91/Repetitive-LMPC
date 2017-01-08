@@ -9,14 +9,16 @@ using JuMP
 using Ipopt
 using PyPlot
 
-c = 1.0         # spring constant
+c = 0.1         # spring constant
+d = 0.0         # damping constant
 r = 1.0         # radius of the wheel
+L = 2.0         # distance of spring mount from wheel center
 
 # State dynamics
 function f(x,u,dt)
     z = copy(x)
     z[1] = x[1] + dt*x[2]
-    z[2] = x[2] + dt*(u-c*r*cos(x[1])*(sin(x[1]+1)))
+    z[2] = x[2] + dt*(u-r*cos(x[1])*(c*(r*sin(x[1])+L) + d*r*x[2]*cos(x[1])))
     return z
 end
 
@@ -25,10 +27,10 @@ function h(x)
     return sum((x-0.5).^2)
 end
 
-n_it = 15           # number of iterations
+n_it = 5            # number of iterations
 xlim = 2*pi         # periodicity (in state 1)
 P = [xlim,0]        # periodicity vector
-buf = 5000          # buffer for each iteration
+buf = 100000        # buffer for each iteration
 n_x = 2             # number of states
 n_u = 1             # number of inputs
 N = 10              # number of prediction steps (horizon)
@@ -61,11 +63,12 @@ for i=1:N
     setupperbound(u[i,1], 3.0)
     setlowerbound(u[i,1], -3.0)
     @NLconstraint(m, x[i+1,1] == x[i,1] + dt*x[i,2])
-    @NLconstraint(m, x[i+1,2] == x[i,2] + dt*(u[i,1] - c*r*cos(x[i,1])*(sin(x[i,1]+1))))
+    @NLconstraint(m, x[i+1,2] == x[i,2] + dt*(u[i,1] - r*cos(x[i,1])*(c*(r*sin(x[i,1])+L)+ d*r*x[i,2]*cos(x[i,1]))))
 end
 @NLconstraint(m, [i=1:n_x], x[1,i] == m_x0[i])                                      # initial condition
 #@NLconstraint(m, x[N+1,2] == m_termSet)                                            # hard terminal constraint
-@NLexpression(m, costZ, sum{(x[i,2]-0.5)^2* (1-1/(1+e^(100*(xlim-x[i,1])))),i=1:N}) # stage cost
+#@NLexpression(m, costZ, sum{(x[i,2]-0.5)^2* (1-1/(1+e^(100*(xlim-x[i,1])))),i=1:N}) # stage cost (with h(x_F)=0)
+@NLexpression(m, costZ, sum{(x[i,2]-0.5)^2,i=1:N})                                        # stage cost (without h(x_F)=0)
 @NLexpression(m, m_termConstCost, (x[N+1,2] - m_termSet)^2)                         # soft terminal constraint
 @NLexpression(m, derivCost, sum{QderivX[j]*sum{(x[i,j]-x[i+1,j])^2,i=1:N},j=1:n_x} + sum{QderivU[j]*((u[1,j]-uprev[j])^2+sum{(u[i,j]-u[i+1,j])^2,i=1:N-1}),j=1:n_u})
 @NLobjective(m, Min, costZ + m_termCost + m_termConstCost*1000 + derivCost)         # objective function
@@ -76,7 +79,7 @@ j = 1
 x_save[1,:,1] = x0
 while x_save[j,1,1] <= xlim
     j += 1
-    x_save[j,:,1] = f(x_save[j-1,:,1],1.0,dt)
+    x_save[j,:,1] = f(x_save[j-1,:,1],0.5,dt)
 end
 
 j_prev = 0      # this is a counter that appends the current iteration to the previous iteration safe set
@@ -112,12 +115,12 @@ for i=2:n_it
         solve(m)
         # Read solution and simulate
         x_sol = getvalue(x)
-        println("Interpolation difference: ", x_sol[N+1,1]-x_save[ind[end],1,i-1])  # should be <0 
+        #println("Interpolation difference: ", x_sol[N+1,1]-x_save[ind[end],1,i-1])  # should be <0 
         checkv = 0.0
         for k=1:termSet_n+1
             checkv += termSet_coeff[k]*x_sol[N+1,1].^(termSet_n+1-k)
         end
-        println("Terminal constraint difference: ",x_sol[N+1,2]-checkv) # should be really close to 0 (soft constraint)
+        #println("Terminal constraint difference: ",x_sol[N+1,2]-checkv) # should be really close to 0 (soft constraint)
         j += 1
         u_save[j,1,i] = getvalue(u)[1,1]
         x_save[j,:,i] = f(x_save[j-1,:,i],u_save[j,1,i],dt)
@@ -125,8 +128,8 @@ for i=2:n_it
         u_save[j_prev+j-1,:,i-1] = u_save[j,:,i]            # append new input to previous safe set
         u_prev = u_save[j,:,i]
         c_save[j,:,i] = [getvalue(costZ) getvalue(m_termCost) getvalue(m_termConstCost)]
-        println("One step error = ", x_save[j,:,i]-x_sol[2,:])      # should be 0 (no model mismatch)
-        println("u = ", u_save[j,1,i])
+        #println("One step error = ", x_save[j,:,i]-x_sol[2,:])      # should be 0 (no model mismatch)
+        #println("u = ", u_save[j,1,i])
         println("cost = ", c_save[j,:,i])
         # Uncomment this to plot prediction and terminal set
         # if i>=2 && j <= 10
@@ -169,7 +172,19 @@ xlabel("Iteration")
 ylabel("J (cost)")
 title("Cost")
 
+figure()
+plot(reshape(x_save[1,2,:],n_it),"-o")
+grid("on")
+xlabel("Iteration")
+ylabel("x_F")
+title("Final state")
 
+figure()
+for i=2:n_it
+    plot(x_save[:,1,i],c_save[:,1,i]+c_save[:,2,i])
+    plot(x_save[:,1,i],c_save[:,1,i],"--")
+end
+grid("on")
 
 # Notes:
 # =======
