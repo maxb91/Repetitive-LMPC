@@ -9,39 +9,35 @@ using JuMP
 using Ipopt
 using PyPlot
 
-c = 0.1         # spring constant
-d = 0.0         # damping constant
-r = 1.0         # radius of the wheel
-L = 2.0         # distance of spring mount from wheel center
-
 # State dynamics
 function f(x,u,dt)
     z = copy(x)
     z[1] = x[1] + dt*x[2]
-    z[2] = x[2] + dt*(u-r*cos(x[1])*(c*(r*sin(x[1])+L) + d*r*x[2]*cos(x[1])))
+    z[2] = x[2] + dt*(u[1]-x[2]-(1-x[3])^2)
+    z[3] = x[3] + dt*(u[2]*x[2])
     return z
 end
 
 # Cost function
 function h(x)
-    return sum((x-0.5).^2)
+    return length(x)
 end
 
-n_it = 5            # number of iterations
-xlim = 2*pi         # periodicity (in state 1)
-P = [xlim,0]        # periodicity vector
+n_it = 30            # number of iterations
+xlim = 1.0         # periodicity (in state 1)
+P = [xlim,0.0,0.0]        # periodicity vector
 buf = 100000        # buffer for each iteration
-n_x = 2             # number of states
-n_u = 1             # number of inputs
-N = 10              # number of prediction steps (horizon)
+n_x = 3             # number of states
+n_u = 2             # number of inputs
+N = 20              # number of prediction steps (horizon)
 dt = 0.01           # time step
 termSet_n = 4       # polynomial degree of terminal set approximation
 termCost_n = 4      # polynomial degree of terminal cost approximation
-QderivX = [0.0,0.1] # derivative cost on states
-QderivU = [0.0]     # derivative cost on input
+QderivX = [0.0,0.1,0.1] # derivative cost on states
+QderivU = [0.0,0.0]     # derivative cost on input
 x0 = zeros(n_x)     # initial state
 
-termSet_coeff = zeros(termSet_n+1)
+termSet_coeff = zeros(termSet_n+1,2)
 termCost_coeff = zeros(termCost_n+1)
 
 x_save = ones(buf,n_x,n_it)*NaN     # buffer for states
@@ -52,24 +48,27 @@ c_save = zeros(buf,3,n_it)          # buffer for cost values
 # Create model:
 m = Model(solver=IpoptSolver(print_level=0))
 @variable(m, x[1:(N+1),1:n_x])          # z = s, ey, epsi, v
-@variable(m, u[1:N,n_u])
+@variable(m, u[1:N,1:n_u])
 @NLparameter(m, m_x0[i=1:n_x] == 0)
-@NLparameter(m, m_termSet_coeff[i=1:termSet_n+1] == termSet_coeff[i])
+@NLparameter(m, m_termSet_coeff[i=1:termSet_n+1,j=1:2] == termSet_coeff[i,j])
 @NLparameter(m, m_termCost_coeff[i=1:termCost_n+1] == termCost_coeff[i])
 @NLparameter(m, uprev[i=1:n_u] == 0)
-@NLexpression(m, m_termSet,  sum{m_termSet_coeff[i]*x[N+1,1]^(termSet_n+1-i),i=1:termSet_n-1}    + m_termSet_coeff[termSet_n]*x[N+1,1]   + m_termSet_coeff[termSet_n+1])
+@NLexpression(m, m_termSet[j=1:2],  sum{m_termSet_coeff[i,j]*x[N+1,1]^(termSet_n+1-i),i=1:termSet_n-1} + m_termSet_coeff[termSet_n,j]*x[N+1,1]   + m_termSet_coeff[termSet_n+1,j])
 @NLexpression(m, m_termCost, sum{m_termCost_coeff[i]*x[N+1,1]^(termCost_n+1-i),i=1:termCost_n-1} + m_termCost_coeff[termCost_n]*x[N+1,1] + m_termCost_coeff[termCost_n+1])
 for i=1:N
-    setupperbound(u[i,1], 3.0)
-    setlowerbound(u[i,1], -3.0)
+    setupperbound(u[i,1], 1.0)
+    setlowerbound(u[i,1], -1.0)
+    setupperbound(u[i,2], 1.0)
+    setlowerbound(u[i,2], -1.0)
     @NLconstraint(m, x[i+1,1] == x[i,1] + dt*x[i,2])
-    @NLconstraint(m, x[i+1,2] == x[i,2] + dt*(u[i,1] - r*cos(x[i,1])*(c*(r*sin(x[i,1])+L)+ d*r*x[i,2]*cos(x[i,1]))))
+    @NLconstraint(m, x[i+1,2] == x[i,2] + dt*(u[i,1] - x[i,2] - (1-x[i,3])^2))
+    @NLconstraint(m, x[i+1,3] == x[i,3] + dt*(u[i,2]*x[i,2]))
 end
 @NLconstraint(m, [i=1:n_x], x[1,i] == m_x0[i])                                      # initial condition
 #@NLconstraint(m, x[N+1,2] == m_termSet)                                            # hard terminal constraint
 #@NLexpression(m, costZ, sum{(x[i,2]-0.5)^2* (1-1/(1+e^(100*(xlim-x[i,1])))),i=1:N}) # stage cost (with h(x_F)=0)
-@NLexpression(m, costZ, sum{(x[i,2]-0.5)^2,i=1:N})                                        # stage cost (without h(x_F)=0)
-@NLexpression(m, m_termConstCost, (x[N+1,2] - m_termSet)^2)                         # soft terminal constraint
+@NLexpression(m, costZ, 1)#sum{(x[i,2]-0.5)^2,i=1:N})                                        # stage cost (without h(x_F)=0)
+@NLexpression(m, m_termConstCost, sum{(x[N+1,i+1] - m_termSet[i])^2,i=1:2})                         # soft terminal constraint
 @NLexpression(m, derivCost, sum{QderivX[j]*sum{(x[i,j]-x[i+1,j])^2,i=1:N},j=1:n_x} + sum{QderivU[j]*((u[1,j]-uprev[j])^2+sum{(u[i,j]-u[i+1,j])^2,i=1:N-1}),j=1:n_u})
 @NLobjective(m, Min, costZ + m_termCost + m_termConstCost*1000 + derivCost)         # objective function
 solve(m)    # first solve
@@ -79,7 +78,7 @@ j = 1
 x_save[1,:,1] = x0
 while x_save[j,1,1] <= xlim
     j += 1
-    x_save[j,:,1] = f(x_save[j-1,:,1],0.5,dt)
+    x_save[j,:,1] = f(x_save[j-1,:,1],[1.5,0.0],dt)
 end
 
 j_prev = 0      # this is a counter that appends the current iteration to the previous iteration safe set
@@ -105,7 +104,8 @@ for i=2:n_it
         for k=1:termSet_n+1
             IntMat[:,k] = x_save[ind,1,i-1].^(termSet_n+1-k)
         end
-        termSet_coeff = IntMat\x_save[ind,2,i-1]
+        termSet_coeff[:,1] = IntMat\x_save[ind,2,i-1]
+        termSet_coeff[:,2] = IntMat\x_save[ind,3,i-1]
         # approximate Q function:
         termCost_coeff = IntMat\Q_save[ind,1,i-1]
         # Set new coefficients and solve MPC problem:
@@ -122,8 +122,8 @@ for i=2:n_it
         end
         #println("Terminal constraint difference: ",x_sol[N+1,2]-checkv) # should be really close to 0 (soft constraint)
         j += 1
-        u_save[j,1,i] = getvalue(u)[1,1]
-        x_save[j,:,i] = f(x_save[j-1,:,i],u_save[j,1,i],dt)
+        u_save[j,:,i] = getvalue(u)[1,:]
+        x_save[j,:,i] = f(x_save[j-1,:,i],u_save[j,:,i],dt)
         x_save[j_prev+j-1,:,i-1] = x_save[j,:,i]+P'         # append new state to previous safe set (shifted)
         u_save[j_prev+j-1,:,i-1] = u_save[j,:,i]            # append new input to previous safe set
         u_prev = u_save[j,:,i]
@@ -152,7 +152,7 @@ end
 figure()
 for i=1:n_it
     ind = x_save[:,1,i] .<= xlim
-    plot(x_save[ind,1,i],x_save[ind,2,i])
+    plot(x_save[ind,1,i],x_save[ind,3,i])
 end
 grid("on")
 title("State")
